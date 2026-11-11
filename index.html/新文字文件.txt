@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>《明日方舟：終末地》抽卡機率計算器</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+</head>
+<body class="bg-slate-900 text-slate-100 min-h-screen flex items-center justify-center p-4">
+  <div id="root" class="w-full max-w-md"></div>
+  <script type="text/babel">
+    const { useState, useMemo } = React;
+
+    function App() {
+      // 核心輸入參數
+      const [budgetPulls, setBudgetPulls] = useState(120); // 準備投入的有效抽數 (資源/付費)
+      const [targetCount, setTargetCount] = useState(1);   // 目標 UP 6 星數量 (含潛能)
+      const [currentPity, setCurrentPity] = useState(0);   // 當前已累積 6 星保底抽數
+      const [upRate, setUpRate] = useState(0.5);           // 出 6 星時 UP 的基礎機率 (預設 50%)
+
+      // 特殊機制開關
+      const [use30For10, setUse30For10] = useState(true);  // 單期滿 30 抽送 10 抽 (限 1 次)
+      const [use120Pity, setUse120Pity] = useState(true);  // 累計 120 抽必中當期 UP (僅限 1 次)
+      const [use240Bonus, setUse240Bonus] = useState(true);// 累計每 240 抽送 UP 潛能信物
+
+      // 常規保底參數
+      const BASE_RATE = 0.008; // 基礎機率 0.8%
+      const SOFT_PITY = 65;    // 第 65 抽開啟軟保底
+      const SOFT_INC = 0.05;    // 每抽遞增 5%
+      const MAX_PITY = 80;     // 第 80 抽硬保底
+
+      // 單抽 6 星出現率計算
+      const getProbForPity = (pityCount) => {
+        if (pityCount >= MAX_PITY) return 1.0;
+        if (pityCount >= SOFT_PITY) {
+          return Math.min(1.0, BASE_RATE + (pityCount - SOFT_PITY + 1) * SOFT_INC);
+        }
+        return BASE_RATE;
+      };
+
+      // 計算當期贈送抽數 (單期僅限 1 次 +10 抽)
+      const bonusFreePulls = useMemo(() => {
+        return (use30For10 && budgetPulls >= 30) ? 10 : 0;
+      }, [budgetPulls, use30For10]);
+
+      // 總試抽數 (僅作為 UI 顯示參考)
+      const totalDisplayPulls = budgetPulls + bonusFreePulls;
+
+      // 計算 240 有效累計抽數獲得的免費 UP 潛能信物 (贈送抽不計入)
+      const milestoneUPCount = useMemo(() => {
+        if (!use240Bonus) return 0;
+        return Math.floor(budgetPulls / 240);
+      }, [budgetPulls, use240Bonus]);
+
+      // DP 馬爾可夫鏈精確計算
+      const cumulativeProbability = useMemo(() => {
+        if (budgetPulls <= 0 || targetCount <= 0) return 0;
+
+        // 扣除 240 抽贈送的信物後，還需要從抽卡中獲得的 UP 數量
+        const neededFromPulls = Math.max(0, targetCount - milestoneUPCount);
+        if (neededFromPulls === 0) return 100.0;
+
+        // dp[k][p] : 抽中 k 個 UP，當前 6 星保底數為 p 的機率
+        let dp = Array.from({ length: neededFromPulls + 1 }, () => new Array(MAX_PITY).fill(0));
+        
+        const initPity = Math.min(currentPity, MAX_PITY - 1);
+        dp[0][initPity] = 1.0;
+
+        // 階段 1: 模擬投入的「有效累計抽數」(budgetPulls)
+        // 增加保底計數、計入 120 抽硬保底門檻
+        for (let i = 1; i <= budgetPulls; i++) {
+          let nextDp = Array.from({ length: neededFromPulls + 1 }, () => new Array(MAX_PITY).fill(0));
+
+          for (let k = 0; k <= neededFromPulls; k++) {
+            for (let p = 0; p < MAX_PITY; p++) {
+              const currentProb = dp[k][p];
+              if (currentProb === 0) continue;
+
+              if (k === neededFromPulls) {
+                // 已達標，保持狀態
+                nextDp[k][p] += currentProb;
+              } else {
+                // 120 抽必中 UP (僅在尚未獲得任何 UP，即 k=0 且有效累計達第 120 抽時觸發)
+                const is120HardPity = use120Pity && (i === 120) && (k === 0);
+
+                if (is120HardPity) {
+                  // 第 120 抽強制獲得 UP 6 星，重置保底
+                  const nextK = Math.min(neededFromPulls, k + 1);
+                  nextDp[nextK][0] += currentProb;
+                } else {
+                  const pityNext = p + 1;
+                  const p_win = getProbForPity(pityNext);
+
+                  // 未抽中 6 星
+                  if (p_win < 1.0) {
+                    nextDp[k][pityNext] += currentProb * (1.0 - p_win);
+                  }
+
+                  // 抽中 UP 6 星
+                  const nextK = Math.min(neededFromPulls, k + 1);
+                  nextDp[nextK][0] += currentProb * p_win * upRate;
+
+                  // 歪常駐 6 星
+                  nextDp[k][0] += currentProb * p_win * (1.0 - upRate);
+                }
+              }
+            }
+          }
+          dp = nextDp;
+        }
+
+        // 階段 2: 模擬當期「免費贈送抽數」(bonusFreePulls)
+        // 規則：獨立出貨判定，未抽中時「不增加」保底計數 p，亦不計入 120/240 保底門檻
+        for (let f = 0; f < bonusFreePulls; f++) {
+          let nextDp = Array.from({ length: neededFromPulls + 1 }, () => new Array(MAX_PITY).fill(0));
+
+          for (let k = 0; k <= neededFromPulls; k++) {
+            for (let p = 0; p < MAX_PITY; p++) {
+              const currentProb = dp[k][p];
+              if (currentProb === 0) continue;
+
+              if (k === neededFromPulls) {
+                nextDp[k][p] += currentProb;
+              } else {
+                const p_win = getProbForPity(p); // 以當前保底率獨立判定
+
+                // 未抽中 6 星：保底計數 p 保持原樣（不增長）
+                if (p_win < 1.0) {
+                  nextDp[k][p] += currentProb * (1.0 - p_win);
+                }
+
+                // 抽中 UP 6 星：成功得 UP，保底重置為 0
+                const nextK = Math.min(neededFromPulls, k + 1);
+                nextDp[nextK][0] += currentProb * p_win * upRate;
+
+                // 歪常駐 6 星：保底重置為 0
+                nextDp[k][0] += currentProb * p_win * (1.0 - upRate);
+              }
+            }
+          }
+          dp = nextDp;
+        }
+
+        // 統計所有達到目標的狀態機率總和
+        let totalWinProb = 0;
+        for (let p = 0; p < MAX_PITY; p++) {
+          totalWinProb += dp[neededFromPulls][p];
+        }
+        return totalWinProb * 100;
+      }, [budgetPulls, targetCount, currentPity, upRate, use120Pity, bonusFreePulls, milestoneUPCount]);
+
+      return (
+        <div className="bg-slate-800 rounded-xl shadow-2xl border border-slate-700 p-6 space-y-5">
+          <div>
+            <h1 className="text-xl font-bold text-amber-400 mb-1 text-center">
+              《明日方舟：終末地》抽卡機率計算器
+            </h1>
+            <p className="text-xs text-slate-400 text-center">
+              精確適配：獨立贈送抽 / 120抽UP保底 / 240抽信物
+            </p>
+          </div>
+
+          <div className="space-y-4">
+            {/* 投入抽數預算 */}
+            <div>
+              <div className="flex justify-between mb-1 text-sm">
+                <span className="text-slate-300">投入有效抽數（預算）</span>
+                <span className="text-amber-400 font-bold">{budgetPulls} 抽</span>
+              </div>
+              <input
+                type="range"
+                min="1"
+                max="360"
+                value={budgetPulls}
+                onChange={(e) => setBudgetPulls(Number(e.target.value))}
+                className="w-full accent-amber-400 cursor-pointer"
+              />
+              
+              <div className="flex flex-col gap-0.5 text-[11px] mt-1">
+                {use30For10 && (
+                  <div className="text-emerald-400 text-right">
+                    {bonusFreePulls > 0 ? (
+                      <>滿 30 抽贈送 +10 抽（不計保底）➔ 當期合計 <span className="font-bold">{totalDisplayPulls}</span> 抽</>
+                    ) : (
+                      <>未滿 30 抽，未觸發當期 +10 抽贈送</>
+                    )}
+                  </div>
+                )}
+                {budgetPulls >= 60 && (
+                  <div className="text-sky-400 text-right">
+                    💡 已滿 60 抽：可額外獲贈 <span className="font-semibold">下一期卡池 10 連券</span>（不計入當期）
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* 目標 UP 數量 */}
+            <div>
+              <div className="flex justify-between mb-1 text-sm">
+                <span className="text-slate-300">目標 UP 6 星數量（含潛能）</span>
+                <span className="text-amber-400 font-bold">{targetCount} 個</span>
+              </div>
+              <input
+                type="range"
+                min="1"
+                max="6"
+                value={targetCount}
+                onChange={(e) => setTargetCount(Number(e.target.value))}
+                className="w-full accent-amber-400 cursor-pointer"
+              />
+              {use240Bonus && milestoneUPCount > 0 && (
+                <div className="text-right text-[11px] text-amber-300 mt-0.5">
+                  已自動抵扣有效累計滿 240 抽贈送的 {milestoneUPCount} 個潛能信物
+                </div>
+              )}
+            </div>
+
+            {/* 已累積保底與 UP 機率設定 */}
+            <div className="grid grid-cols-2 gap-3 pt-1">
+              <div>
+                <label className="text-xs text-slate-300 block mb-1">當前累積保底抽數</label>
+                <input
+                  type="number"
+                  min="0"
+                  max="79"
+                  value={currentPity}
+                  onChange={(e) => setCurrentPity(Math.max(0, Math.min(79, Number(e.target.value))))}
+                  className="w-full bg-slate-900 border border-slate-700 rounded p-1.5 text-sm text-amber-400 text-center focus:outline-none focus:border-amber-400"
+                />
+              </div>
+              <div>
+                <label className="text-xs text-slate-300 block mb-1">6星中 UP 機率</label>
+                <select
+                  value={upRate}
+                  onChange={(e) => setUpRate(Number(e.target.value))}
+                  className="w-full bg-slate-900 border border-slate-700 rounded p-1.5 text-sm text-amber-400 text-center focus:outline-none focus:border-amber-400"
+                >
+                  <option value={0.5}>50% (標準)</option>
+                  <option value={0.7}>70%</option>
+                </select>
+              </div>
+            </div>
+
+            {/* 特殊保底機制開關 */}
+            <div className="bg-slate-900/60 p-3 rounded-lg border border-slate-700/80 space-y-2 text-xs">
+              <label className="flex items-center justify-between cursor-pointer">
+                <span className="text-slate-300">滿 30 抽送當期 10 抽（單期一次）</span>
+                <input
+                  type="checkbox"
+                  checked={use30For10}
+                  onChange={(e) => setUse30For10(e.target.checked)}
+                  className="w-4 h-4 accent-amber-400 rounded"
+                />
+              </label>
+              <label className="flex items-center justify-between cursor-pointer">
+                <span className="text-slate-300">有效累計 120 抽首個 UP 硬保底</span>
+                <input
+                  type="checkbox"
+                  checked={use120Pity}
+                  onChange={(e) => setUse120Pity(e.target.checked)}
+                  className="w-4 h-4 accent-amber-400 rounded"
+                />
+              </label>
+              <label className="flex items-center justify-between cursor-pointer">
+                <span className="text-slate-300">有效累計滿 240 抽送 UP 潛能信物</span>
+                <input
+                  type="checkbox"
+                  checked={use240Bonus}
+                  onChange={(e) => setUse240Bonus(e.target.checked)}
+                  className="w-4 h-4 accent-amber-400 rounded"
+                />
+              </label>
+            </div>
+          </div>
+
+          {/* 機率結果展示 */}
+          <div className="bg-slate-900/90 rounded-lg p-4 border border-slate-700 text-center">
+            <div className="text-xs text-slate-400 mb-1">
+              取得至少 {targetCount} 個 UP 6 星的成功機率
+            </div>
+            <div className="text-3xl font-extrabold text-amber-400">
+              {cumulativeProbability.toFixed(2)} %
+            </div>
+          </div>
+
+          {/* 機制說明提示 */}
+          <div className="text-[11px] text-slate-400 space-y-1 border-t border-slate-700/60 pt-3">
+            <p>• 基礎率：0.8% | 軟保底：第 65 抽起 +5% | 80 抽必出 6 星</p>
+            <p>• 當期贈送 10 抽獨立計算出貨，不累積保底與 120/240 門檻</p>
+            <p>• 滿 60 抽贈送之十連券僅適用於下一期卡池</p>
+          </div>
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  </script>
+</body>
+</html>
